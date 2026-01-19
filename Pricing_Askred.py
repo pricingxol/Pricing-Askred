@@ -3,8 +3,9 @@ import pandas as pd
 import numpy as np
 import tempfile
 
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib import colors
 
 # =====================================================
 # CONFIG
@@ -22,32 +23,36 @@ st.title("📊 Pricing Asuransi Kredit – Data OJK per September 2025")
 st.caption("By Divisi Aktuaria Askrindo")
 
 # =====================================================
-# LOAD MASTER DATA (READ-ONLY)
+# LOAD MASTER DATA
 # =====================================================
+@st.cache_data
+def load_master():
+    xls = pd.ExcelFile("Data Base OJK.xlsx")
 
-# === PROVINSI ===
-prov_col = require_column(prov_df, "Provinsi")
-npl_col = require_column(prov_df, "Average NPL")
-rel_col = require_column(prov_df, "Average Relativity")
+    prov_prod = pd.read_excel(xls, "Template NPL Produktif Provinsi")
+    prov_cons = pd.read_excel(xls, "Template NPL Konsumtif Provinsi")
+    bank_df = pd.read_excel(xls, "Template NPL Jenis Bank")
+    sector_df = pd.read_excel(xls, "Template NPL Sektor")
 
-# === BANK ===
-bank_col = require_column(bank_df, "Jenis Bank")
-bank_rel_col = require_column(bank_df, "Average Relativity")
+    # strip column names (ANTI SPASI TERSEMBUNYI)
+    for df in [prov_prod, prov_cons, bank_df, sector_df]:
+        df.columns = df.columns.str.strip()
 
-# === SEKTOR ===
-sector_col = require_column(sector_df, "Sektor")
-sector_rel_col = require_column(sector_df, "Average Relativity")
+    return prov_prod, prov_cons, bank_df, sector_df
 
+prov_prod, prov_cons, bank_df, sector_df = load_master()
 
 # =====================================================
-# HELPER FUNCTIONS (ROBUST TO TEMPLATE)
+# STRICT COLUMN CHECK
 # =====================================================
 def require_column(df, col):
     if col not in df.columns:
-        raise ValueError(f"Kolom '{col}' tidak ditemukan di Excel")
+        raise ValueError(f"Kolom '{col}' WAJIB ada di Excel")
     return col
 
-
+# =====================================================
+# HELPER FUNCTIONS
+# =====================================================
 def get_value(df, key_col, key_val, val_col):
     return float(df.loc[df[key_col] == key_val, val_col].values[0])
 
@@ -57,8 +62,8 @@ def calc_total_relativity(rp, rb, rs):
 def expected_probability(npl, porsi_non_nd, relativity, coverage, recovery):
     return npl * porsi_non_nd * relativity * coverage * (1 - recovery)
 
-def average_baki_debet(loan_rate, tenor):
-    balances = [(1 / ((1 + loan_rate) ** t)) for t in range(1, tenor + 1)]
+def average_baki_debet(rate, tenor):
+    balances = [(1 / ((1 + rate) ** t)) for t in range(1, tenor + 1)]
     return np.mean(balances)
 
 def pure_rate(probability, severity):
@@ -89,24 +94,22 @@ c1, c2, c3 = st.columns(3)
 
 with c1:
     jenis_kredit = st.selectbox("Jenis Kredit", ["Produktif", "Konsumtif"])
-    prov_df = data["prov_prod"] if jenis_kredit == "Produktif" else data["prov_cons"]
+    prov_df = prov_prod if jenis_kredit == "Produktif" else prov_cons
 
-    prov_col = find_column(prov_df, ["prov", "wilayah"])
-    npl_col = find_column(prov_df, ["npl"])
-    rel_col = find_column(prov_df, ["relativ"])
+    prov_col = require_column(prov_df, "Provinsi")
+    npl_col = require_column(prov_df, "Average NPL")
+    rel_col = require_column(prov_df, "Average Relativity")
 
     wilayah = st.selectbox("Wilayah", prov_df[prov_col].unique())
 
 with c2:
-    bank_df = data["bank"]
-    bank_col = find_column(bank_df, ["bank"])
-    bank_rel_col = find_column(bank_df, ["relativ"])
+    bank_col = require_column(bank_df, "Jenis Bank")
+    bank_rel_col = require_column(bank_df, "Average Relativity")
 
     jenis_bank = st.selectbox("Jenis Bank", bank_df[bank_col].unique())
 
-    sector_df = data["sector"]
-    sector_col = find_column(sector_df, ["sektor"])
-    sector_rel_col = find_column(sector_df, ["relativ"])
+    sector_col = require_column(sector_df, "Sektor")
+    sector_rel_col = require_column(sector_df, "Average Relativity")
 
     sektor = st.selectbox("Sektor", sector_df[sector_col].unique())
 
@@ -146,11 +149,7 @@ if st.button("Calculate"):
     recovery = rec_prod if jenis_kredit == "Produktif" else rec_cons
 
     prob = expected_probability(
-        npl,
-        porsi_non_nd,
-        total_rel,
-        coverage,
-        recovery
+        npl, porsi_non_nd, total_rel, coverage, recovery
     )
 
     avg_bd = average_baki_debet(loan_rate, tenor)
@@ -163,12 +162,9 @@ if st.button("Calculate"):
     results = []
     for acq in ACQUISITION_OPTIONS:
         gr = gross_rate(pure, risk_margin, expense, profit, acq)
-        results.append({
-            "Akuisisi": f"{acq*100:.1f}%",
-            "Gross Rate": f"{gr:.4%}"
-        })
+        results.append([f"{acq*100:.1f}%", f"{gr:.4%}"])
 
-    df_result = pd.DataFrame(results)
+    df_result = pd.DataFrame(results, columns=["Akuisisi", "Gross Rate"])
     st.table(df_result)
 
     # =================================================
@@ -189,11 +185,15 @@ if st.button("Calculate"):
             Spacer(1, 12),
         ]
 
-        for _, r in df_result.iterrows():
-            story.append(
-                Paragraph(f"Akuisisi {r['Akuisisi']} : {r['Gross Rate']}", styles["Normal"])
-            )
+        table = Table(
+            [["Akuisisi", "Gross Rate"]] + results,
+            style=TableStyle([
+                ("GRID", (0,0), (-1,-1), 0.5, colors.black),
+                ("BACKGROUND", (0,0), (-1,0), colors.lightgrey)
+            ])
+        )
 
+        story.append(table)
         doc.build(story)
 
         with open(tmp.name, "rb") as f:
