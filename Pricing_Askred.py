@@ -24,27 +24,29 @@ st.caption("By Divisi Aktuaria Askrindo")
 # =====================================================
 # LOAD MASTER DATA (READ-ONLY)
 # =====================================================
-@st.cache_data
-def load_master():
-    xls = pd.ExcelFile("Data Base OJK.xlsx")
-    return {
-        "prov_prod": pd.read_excel(xls, "Template NPL Produktif Provinsi"),
-        "prov_cons": pd.read_excel(xls, "Template NPL Konsumtif Provinsi"),
-        "bank": pd.read_excel(xls, "Template NPL Jenis Bank"),
-        "sector": pd.read_excel(xls, "Template NPL Sektor"),
-    }
 
-data = load_master()
+# === PROVINSI ===
+prov_col = require_column(prov_df, "Provinsi")
+npl_col = require_column(prov_df, "Average NPL")
+rel_col = require_column(prov_df, "Average Relativity")
+
+# === BANK ===
+bank_col = require_column(bank_df, "Jenis Bank")
+bank_rel_col = require_column(bank_df, "Average Relativity")
+
+# === SEKTOR ===
+sector_col = require_column(sector_df, "Sektor")
+sector_rel_col = require_column(sector_df, "Average Relativity")
+
 
 # =====================================================
 # HELPER FUNCTIONS (ROBUST TO TEMPLATE)
 # =====================================================
-def find_column(df, keywords):
-    for col in df.columns:
-        for kw in keywords:
-            if kw.lower() in col.lower():
-                return col
-    raise ValueError(f"Kolom dengan keyword {keywords} tidak ditemukan")
+def require_column(df, col):
+    if col not in df.columns:
+        raise ValueError(f"Kolom '{col}' tidak ditemukan di Excel")
+    return col
+
 
 def get_value(df, key_col, key_val, val_col):
     return float(df.loc[df[key_col] == key_val, val_col].values[0])
