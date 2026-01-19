@@ -1,264 +1,175 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
+import tempfile
 
-# =====================================================
-# PAGE CONFIG
-# =====================================================
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
+
+# ======================
+# CONFIG
+# ======================
+MAX_COVERAGE = 0.75
+MAX_RELATIVITY = 3.5
+ACQUISITION_OPTIONS = [0.0, 0.025, 0.05, 0.075, 0.10]
+
 st.set_page_config(
-    page_title="Bundling Rate Calculator",
+    page_title="Pricing Asuransi Kredit",
     layout="wide"
 )
 
-st.title("📊 Bundling Rate Calculator")
-st.caption("by Divisi Aktuaria Askrindo")
+st.title("📊 Pricing Asuransi Kredit – Data OJK per September 2025")
+st.caption("By Divisi Aktuaria Askrindo")
 
-# =====================================================
-# PRICING ASSUMPTIONS (LOCKED)
-# =====================================================
-EXPENSE = 0.15
-PROFIT = 0.05
-MAX_AKUISISI = 0.20
+# ======================
+# LOAD MASTER DATA
+# ======================
+@st.cache_data
+def load_master():
+    xls = pd.ExcelFile("Data Base OJK.xlsx")
+    return {
+        "prov_prod": pd.read_excel(xls, "Template NPL Produktif Provinsi"),
+        "prov_cons": pd.read_excel(xls, "Template NPL Konsumtif Provinsi"),
+        "bank": pd.read_excel(xls, "Template NPL Jenis Bank"),
+        "sector": pd.read_excel(xls, "Template NPL Sektor"),
+    }
 
-LOCKED_AKUISISI = {
-    "Property": 0.15,
-    "Motorvehicle": 0.25
-}
+data = load_master()
 
-# =====================================================
-# LOAD RATE MATRIX
-# =====================================================
-@st.cache_data(show_spinner="Loading rate matrix...")
-def load_rate_matrix(path):
-    df = pd.read_excel(path)
-    df.columns = df.columns.str.strip()
-    return df
+# ======================
+# HELPER FUNCTIONS
+# ======================
+def get_value(df, key_col, key_val, val_col):
+    return float(df.loc[df[key_col] == key_val, val_col].values[0])
 
-df_rate = load_rate_matrix("rate_matrix_produk.xlsx")
+def total_relativity(rp, rb, rs):
+    return min(rp * rb * rs, MAX_RELATIVITY)
 
-# =====================================================
-# CORE RATE ENGINE
-# =====================================================
-def get_rate(df, coverage, subcover, factors):
+def expected_probability(npl, porsi_non_nd, rel, coverage, recovery):
+    return npl * porsi_non_nd * rel * coverage * (1 - recovery)
 
-    q = (df["Coverage"] == coverage) & (df["Subcover"] == subcover)
+def average_baki_debet(rate, tenor):
+    balances = [(1 / ((1 + rate) ** t)) for t in range(1, tenor + 1)]
+    return np.mean(balances)
 
-    for col, val in factors.items():
-        q &= (
-            (df[col].astype(str) == str(val)) |
-            (df[col].isna())
-        )
+def pure_rate(prob, sev):
+    return prob * sev
 
-    result = df[q].copy()
+def gross_rate(pure, risk_margin, expense, profit, acq):
+    return (pure * (1 + risk_margin)) / (1 - expense - profit - acq)
 
-    if result.empty:
-        raise ValueError(f"Rate tidak ditemukan: {coverage} - {subcover}")
+# ======================
+# INPUT IDENTITAS
+# ======================
+with st.container():
+    c1, c2 = st.columns(2)
+    with c1:
+        nama_tertanggung = st.text_input("Nama Tertanggung")
+        nama_bank_input = st.text_input("Nama Bank")
+    with c2:
+        no_polis = st.text_input("Nomor Polis Existing", "New")
+        no_pks = st.text_input("Nomor PKS Existing", "New")
 
-    factor_cols = [
-        c for c in df.columns
-        if c not in ["Coverage", "Subcover", "Rate"]
-    ]
+# ======================
+# INPUT RISIKO
+# ======================
+st.subheader("Data Risiko")
 
-    result["priority"] = result[factor_cols].isna().sum(axis=1)
+c1, c2, c3 = st.columns(3)
 
-    return float(result.sort_values("priority").iloc[0]["Rate"])
+with c1:
+    jenis_kredit = st.selectbox("Jenis Kredit", ["Produktif", "Konsumtif"])
+    prov_df = data["prov_prod"] if jenis_kredit == "Produktif" else data["prov_cons"]
+    wilayah = st.selectbox("Wilayah", prov_df["Provinsi"].unique())
 
-# =====================================================
-# SESSION STATE
-# =====================================================
-if "products" not in st.session_state:
-    st.session_state.products = [{}]
+with c2:
+    jenis_bank = st.selectbox("Jenis Bank", data["bank"]["Jenis Bank"].unique())
+    sektor = st.selectbox("Sektor", data["sector"]["Sektor"].unique())
 
-if "results" not in st.session_state:
-    st.session_state.results = None
+with c3:
+    coverage = st.number_input("Coverage", 0.0, MAX_COVERAGE, 0.6)
+    loan_rate = st.number_input("Suku Bunga Kredit (%)", 0.0, 50.0, 12.0) / 100
+    tenor = st.number_input("Jangka Waktu (Tahun)", 1, 20, 3)
 
-# =====================================================
-# INPUT PRODUK
-# =====================================================
-st.subheader("Input Produk")
+# ======================
+# SIDEBAR ASSUMPTION
+# ======================
+st.sidebar.header("Asumsi Pricing")
 
-coverage_list = sorted(df_rate["Coverage"].dropna().unique())
+risk_margin = st.sidebar.number_input("Risk Margin", 0.0, 1.0, 0.1)
+expense = st.sidebar.number_input("Expense", 0.0, 1.0, 0.05)
+profit = st.sidebar.number_input("Profit", 0.0, 1.0, 0.1)
 
-for i, p in enumerate(st.session_state.products):
+rec_prod = st.sidebar.number_input("Recoveries Produktif", 0.0, 1.0, 0.4)
+rec_cons = st.sidebar.number_input("Recoveries Konsumtif", 0.0, 1.0, 0.2)
 
-    cols = st.columns([2, 3, 2, 2, 2, 1, 0.5])
+inv_rate = st.sidebar.number_input("Suku Bunga Investasi", 0.0, 20.0, 6.0) / 100
+porsi_non_nd = st.sidebar.number_input("Porsi Non-ND", 0.0, 1.0, 0.8)
 
-    # Coverage
-    with cols[0]:
-        p["Coverage"] = st.selectbox(
-            "Coverage" if i == 0 else "",
-            coverage_list,
-            key=f"coverage_{i}"
-        )
+# ======================
+# CALCULATE
+# ======================
+if st.button("Calculate"):
+    npl = get_value(prov_df, "Provinsi", wilayah, "Average NPL")
 
-    # Subcover
-    subcover_list = (
-        df_rate[df_rate["Coverage"] == p["Coverage"]]["Subcover"]
-        .dropna().unique()
+    rel_p = get_value(prov_df, "Provinsi", wilayah, "Average Relativity")
+    rel_b = get_value(data["bank"], "Jenis Bank", jenis_bank, "Average Relativity")
+    rel_s = get_value(data["sector"], "Sektor", sektor, "Average Relativity")
+
+    rel_total = total_relativity(rel_p, rel_b, rel_s)
+
+    recovery = rec_prod if jenis_kredit == "Produktif" else rec_cons
+
+    prob = expected_probability(
+        npl, porsi_non_nd, rel_total, coverage, recovery
     )
 
-    with cols[1]:
-        p["Subcover"] = st.selectbox(
-            "Subcover" if i == 0 else "",
-            sorted(subcover_list),
-            key=f"subcover_{i}"
-        )
+    avg_bd = average_baki_debet(loan_rate, tenor)
+    sev = avg_bd / ((1 + inv_rate) ** tenor)
 
-    # Context-aware factors
-    df_ctx = df_rate[
-        (df_rate["Coverage"] == p["Coverage"]) &
-        (df_rate["Subcover"] == p["Subcover"])
-    ]
+    pure = pure_rate(prob, sev)
 
-    factor_cols = [
-        c for c in df_ctx.columns
-        if c not in ["Coverage", "Subcover", "Rate"]
-        and df_ctx[c].dropna().nunique() > 0
-    ]
+    st.subheader("Hasil Perhitungan Rate")
 
-    factors = {}
+    result_table = []
+    for acq in ACQUISITION_OPTIONS:
+        gr = gross_rate(pure, risk_margin, expense, profit, acq)
+        result_table.append({
+            "Akuisisi": f"{acq*100:.1f}%",
+            "Gross Rate": f"{gr:.4%}"
+        })
 
-    for idx, col in enumerate(factor_cols[:3]):
-        with cols[2 + idx]:
-            values = (
-                df_ctx[col]
-                .dropna()
-                .astype(str)
-                .unique()
+    df_result = pd.DataFrame(result_table)
+    st.table(df_result)
+
+    # ======================
+    # EXPORT PDF
+    # ======================
+    if st.button("Export PDF"):
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+        styles = getSampleStyleSheet()
+        doc = SimpleDocTemplate(tmp.name)
+
+        story = [
+            Paragraph("<b>Pricing Asuransi Kredit – Data OJK per September 2025</b>", styles["Title"]),
+            Spacer(1, 12),
+            Paragraph(f"Nama Tertanggung: {nama_tertanggung}", styles["Normal"]),
+            Paragraph(f"Nama Bank: {nama_bank_input}", styles["Normal"]),
+            Paragraph(f"Nomor Polis: {no_polis}", styles["Normal"]),
+            Paragraph(f"Nomor PKS: {no_pks}", styles["Normal"]),
+            Spacer(1, 12),
+        ]
+
+        for _, r in df_result.iterrows():
+            story.append(
+                Paragraph(f"Akuisisi {r['Akuisisi']} : {r['Gross Rate']}", styles["Normal"])
             )
 
-            selected = st.selectbox(
-                col if i == 0 else "",
-                sorted(values),
-                key=f"{col}_{i}"
+        doc.build(story)
+
+        with open(tmp.name, "rb") as f:
+            st.download_button(
+                "Download PDF",
+                f,
+                file_name="Pricing_Askred.pdf"
             )
-
-            factors[col] = selected
-
-            df_ctx = df_ctx[
-                (df_ctx[col].astype(str) == str(selected)) |
-                (df_ctx[col].isna())
-            ]
-
-    p["Factors"] = factors
-    p["ExpectedFactors"] = factor_cols
-
-    # =================================================
-    # AKUISISI PER PRODUK (PROTECTED)
-    # =================================================
-    with cols[5]:
-        if p["Coverage"] in LOCKED_AKUISISI:
-            p["Akuisisi"] = LOCKED_AKUISISI[p["Coverage"]]
-
-            st.number_input(
-                "Akuisisi (%)" if i == 0 else "",
-                value=p["Akuisisi"] * 100,
-                disabled=True,
-                key=f"akuisisi_{i}"
-            )
-        else:
-            p["Akuisisi"] = st.number_input(
-                "Akuisisi (%)" if i == 0 else "",
-                min_value=0.0,
-                max_value=20.0,
-                value=20.0,
-                step=0.5,
-                key=f"akuisisi_{i}"
-            ) / 100
-
-    # Delete row
-    with cols[6]:
-        if len(st.session_state.products) > 1:
-            if st.button("❌", key=f"del_{i}"):
-                st.session_state.products.pop(i)
-                st.session_state.results = None
-                st.rerun()
-
-# =====================================================
-# ADD PRODUCT
-# =====================================================
-if st.button("➕ Tambah Produk"):
-    st.session_state.products.append({})
-    st.session_state.results = None
-    st.rerun()
-
-# =====================================================
-# VALIDATION
-# =====================================================
-def validate_products(products):
-    for idx, p in enumerate(products, start=1):
-
-        if len(p.get("Factors", {})) < len(p.get("ExpectedFactors", [])):
-            return False, f"Produk {idx}: Faktor risiko belum lengkap"
-
-        if p["Coverage"] not in LOCKED_AKUISISI and p["Akuisisi"] > MAX_AKUISISI:
-            return False, f"Akuisisi Produk {idx} melebihi 20%"
-
-    return True, None
-
-# =====================================================
-# HITUNG RATE
-# =====================================================
-if st.button("Hitung Rate"):
-
-    valid, msg = validate_products(st.session_state.products)
-
-    if not valid:
-        st.error(f"❌ {msg}")
-    else:
-        results = []
-        total_rate = 0
-
-        denom_matrix = 1 - EXPENSE - PROFIT - MAX_AKUISISI  # 0.6
-
-        for p in st.session_state.products:
-
-            base_rate = get_rate(
-                df_rate,
-                p["Coverage"],
-                p["Subcover"],
-                p["Factors"]
-            )
-
-            denom_user = 1 - EXPENSE - PROFIT - p["Akuisisi"]
-            adjusted_rate = base_rate * (denom_matrix / denom_user)
-
-            total_rate += adjusted_rate
-
-            results.append({
-                "Coverage": p["Coverage"],
-                "Subcover": p["Subcover"],
-                **p["Factors"],
-                "Akuisisi (%)": f"{p['Akuisisi']*100:.1f}%",
-                "Rate (%)": adjusted_rate * 100
-            })
-
-        st.session_state.results = (results, total_rate)
-
-# =====================================================
-# OUTPUT
-# =====================================================
-if st.session_state.results:
-
-    results, total_rate = st.session_state.results
-
-    st.subheader("Bundling Product")
-
-    df_out = pd.DataFrame(results)
-    df_out.insert(0, "No", range(1, len(df_out) + 1))
-    df_out["Rate (%)"] = df_out["Rate (%)"].map(lambda x: f"{x:.4f}%")
-
-    st.dataframe(df_out, use_container_width=True, hide_index=True)
-
-    st.success(
-        f"✅ **Total Bundling Rate (Adjusted)**: {total_rate * 100:.4f}%"
-    )
-
-    st.warning(
-        """
-        **Catatan:**
-        1. Rate dan akuisisi kelas bisnis Property dan Motorvehicle menyesuaikan ketentuan Regulator.
-        2. Maksimum akuisisi untuk produk selain Property dan Motorvehicle adalah **20%**.
-        3. Besarnya rate adjustment dilakukan dengan adanya **perbedaan asumsi akuisisi**.
-        4. Perhitungan profitability bundling dapat diakses pada link **https://profitabilitycheckingaskrindo.streamlit.app/**.
-        """
-    )
