@@ -29,10 +29,10 @@ st.caption("By Divisi Aktuaria Askrindo")
 def load_master():
     xls = pd.ExcelFile("Data Base OJK.xlsx")
 
-    prov_prod = pd.read_excel(xls, "Template NPL Produktif Provinsi")
-    prov_cons = pd.read_excel(xls, "Template NPL Konsumtif Provinsi")
-    bank_df = pd.read_excel(xls, "Template NPL Jenis Bank")
-    sector_df = pd.read_excel(xls, "Template NPL Sektor")
+    prov_prod = pd.read_excel(xls, "NPL Produktif per Provinsi")
+    prov_cons = pd.read_excel(xls, "NPL Konsumtif per Provinsi")
+    bank_df = pd.read_excel(xls, "NPL Jenis Bank")
+    sector_df = pd.read_excel(xls, "NPL Sektor")
 
     # strip column names (ANTI SPASI TERSEMBUNYI)
     for df in [prov_prod, prov_cons, bank_df, sector_df]:
