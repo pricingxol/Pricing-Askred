@@ -10,31 +10,32 @@ from reportlab.lib import colors
 # =====================================================
 # CONFIG
 # =====================================================
-MAX_COVERAGE = 100.0
 MAX_RELATIVITY = 3.5
-ACQUISITION_OPTIONS = [0.0, 2.5, 5.0, 7.5, 10.0]  # persen
+ACQUISITION_OPTIONS = [0.0, 2.5, 5.0, 7.5, 10.0]  # %
 
 st.set_page_config(
     page_title="Pricing Asuransi Kredit",
     layout="wide"
 )
 
-st.title("📊 Pricing Asuransi Kredit – Data OJK per September 2025")
-st.caption("By Divisi Aktuaria Askrindo")
+st.title("📊 Pricing Asuransi Kredit – Data OJK")
+st.caption("Divisi Aktuaria")
 
 # =====================================================
-# HELPER – RATE HANDLING
+# HELPER – RATE
 # =====================================================
 def pct(x):
-    """convert percent input → decimal"""
-    return x / 100
+    return x / 100.0
 
 # =====================================================
-# LOAD MASTER DATA
+# LOAD MASTER DATA (NO CACHE – STABLE)
 # =====================================================
-@st.cache_data
 def load_master():
-    xls = pd.ExcelFile("Data Base OJK.xlsx")
+    try:
+        xls = pd.ExcelFile("Data Base OJK.xlsx")
+    except Exception as e:
+        st.error("File 'Data Base OJK.xlsx' tidak ditemukan / tidak bisa dibaca")
+        st.stop()
 
     prov_prod = pd.read_excel(xls, "NPL Produktif per Provinsi")
     prov_cons = pd.read_excel(xls, "NPL Konsumtif per Provinsi")
@@ -49,18 +50,34 @@ def load_master():
 prov_prod, prov_cons, bank_df, sector_df = load_master()
 
 # =====================================================
-# VALIDATION
+# SAFE DATA ACCESS
 # =====================================================
 def require_column(df, col):
     if col not in df.columns:
-        raise ValueError(f"Kolom '{col}' WAJIB ada di Excel")
+        st.error(f"Kolom '{col}' tidak ditemukan di Excel")
+        st.stop()
     return col
 
-def get_value(df, key_col, key_val, val_col):
-    return float(df.loc[df[key_col] == key_val, val_col].values[0])
+def safe_get_value(df, key_col, key_val, val_col):
+    mask = df[key_col].astype(str).str.strip() == str(key_val).strip()
+    row = df.loc[mask, val_col]
+    if row.empty:
+        st.error(f"Data tidak ditemukan: {key_col} = {key_val}")
+        st.stop()
+    return float(row.iloc[0])
+
+def clean_options(series):
+    return (
+        series.dropna()
+        .astype(str)
+        .str.strip()
+        .sort_values()
+        .unique()
+        .tolist()
+    )
 
 # =====================================================
-# SEVERITY (FIXED – SESUAI EXCEL)
+# SEVERITY – SESUAI EXCEL
 # =====================================================
 def severity_askred(loan_rate, inv_rate, tenor):
     sev = 0.0
@@ -84,7 +101,7 @@ with c2:
     no_pks = st.text_input("Nomor PKS Existing", "New")
 
 # =====================================================
-# DATA RISIKO
+# DATA RISIKO (LAYOUT SESUAI GAMBAR)
 # =====================================================
 st.subheader("Data Risiko")
 
@@ -98,17 +115,17 @@ with c1:
     npl_col  = require_column(prov_df, "Average NPL")
     rel_col  = require_column(prov_df, "Average Relativity")
 
-    wilayah = st.selectbox("Wilayah", prov_df[prov_col].dropna().unique())
+    wilayah = st.selectbox("Wilayah", clean_options(prov_df[prov_col]))
 
 with c2:
     bank_col = require_column(bank_df, "Jenis Bank")
     bank_rel_col = require_column(bank_df, "Average Relativity")
-    jenis_bank = st.selectbox("Jenis Bank", bank_df[bank_col].dropna().unique())
+    jenis_bank = st.selectbox("Jenis Bank", clean_options(bank_df[bank_col]))
 
 with c3:
     coverage_pct = st.number_input(
         "Coverage (%)",
-        0.0, MAX_COVERAGE, 75.00,
+        0.0, 100.0, 75.00,
         step=0.01, format="%.2f"
     )
     coverage = pct(coverage_pct)
@@ -122,7 +139,7 @@ with c4:
     loan_rate = pct(loan_rate_pct)
 
 with c5:
-    tenor = st.number_input("Jangka Waktu (Tahun)", 1, 20, 1)
+    tenor = st.number_input("Jangka Waktu (Tahun)", 1, 30, 1)
 
 # ---- SEKTOR (PALING BAWAH, FULL WIDTH)
 sector_col = require_column(sector_df, "Sektor")
@@ -130,7 +147,7 @@ sector_rel_col = require_column(sector_df, "Average Relativity")
 
 sektor = st.selectbox(
     "Sektor",
-    sector_df[sector_col].dropna().unique()
+    clean_options(sector_df[sector_col])
 )
 
 # =====================================================
@@ -138,57 +155,48 @@ sektor = st.selectbox(
 # =====================================================
 st.sidebar.header("Asumsi Pricing (%)")
 
-risk_margin_pct = st.sidebar.number_input(
+risk_margin = pct(st.sidebar.number_input(
     "Risk Margin (%)", 0.0, 100.0, 25.00, step=0.01, format="%.2f"
-)
-expense_pct = st.sidebar.number_input(
+))
+expense = pct(st.sidebar.number_input(
     "Expense (%)", 0.0, 100.0, 15.00, step=0.01, format="%.2f"
-)
-profit_pct = st.sidebar.number_input(
+))
+profit = pct(st.sidebar.number_input(
     "Profit (%)", 0.0, 100.0, 10.00, step=0.01, format="%.2f"
-)
+))
 
-rec_prod_pct = st.sidebar.number_input(
+rec_prod = pct(st.sidebar.number_input(
     "Recoveries Produktif (%)", 0.0, 100.0, 0.00, step=0.01, format="%.2f"
-)
-rec_cons_pct = st.sidebar.number_input(
+))
+rec_cons = pct(st.sidebar.number_input(
     "Recoveries Konsumtif (%)", 0.0, 100.0, 0.00, step=0.01, format="%.2f"
-)
+))
 
-inv_rate_pct = st.sidebar.number_input(
+inv_rate = pct(st.sidebar.number_input(
     "Suku Bunga Investasi (%)",
-    0.0, 20.0, 6.106778,
-    step=0.000001, format="%.6f"
-)
+    0.0, 20.0, 6.1000,
+    step=0.0001, format="%.4f"
+))
 
-porsi_non_nd_pct = st.sidebar.number_input(
+porsi_non_nd = pct(st.sidebar.number_input(
     "Porsi Non-ND (%)", 0.0, 100.0, 40.00, step=0.01, format="%.2f"
-)
-
-# convert
-risk_margin = pct(risk_margin_pct)
-expense     = pct(expense_pct)
-profit      = pct(profit_pct)
-rec_prod    = pct(rec_prod_pct)
-rec_cons    = pct(rec_cons_pct)
-inv_rate    = pct(inv_rate_pct)
-porsi_non_nd = pct(porsi_non_nd_pct)
+))
 
 # =====================================================
-# CALCULATE
+# CALCULATION
 # =====================================================
 if st.button("Calculate"):
 
     base_denom = 1 - expense - profit
     if base_denom <= 0:
-        st.error("Expense + Profit ≥ 100%")
+        st.error("Expense + Profit ≥ 100% → model tidak valid")
         st.stop()
 
-    npl = get_value(prov_df, prov_col, wilayah, npl_col)
+    npl = safe_get_value(prov_df, prov_col, wilayah, npl_col)
 
-    rel_p = get_value(prov_df, prov_col, wilayah, rel_col)
-    rel_b = get_value(bank_df, bank_col, jenis_bank, bank_rel_col)
-    rel_s = get_value(sector_df, sector_col, sektor, sector_rel_col)
+    rel_p = safe_get_value(prov_df, prov_col, wilayah, rel_col)
+    rel_b = safe_get_value(bank_df, bank_col, jenis_bank, bank_rel_col)
+    rel_s = safe_get_value(sector_df, sector_col, sektor, sector_rel_col)
 
     total_rel = min(rel_p * rel_b * rel_s, MAX_RELATIVITY)
 
@@ -204,10 +212,11 @@ if st.button("Calculate"):
     results = []
     for acq in ACQUISITION_OPTIONS:
         acq_d = pct(acq)
-        if base_denom - acq_d <= 0:
+        den = base_denom - acq_d
+        if den <= 0:
             results.append([f"{acq:.1f}%", "INVALID"])
             continue
-        gross = (pure * (1 + risk_margin)) / (base_denom - acq_d)
+        gross = (pure * (1 + risk_margin)) / den
         results.append([f"{acq:.1f}%", f"{gross:.4%}"])
 
     st.table(pd.DataFrame(results, columns=["Akuisisi", "Gross Rate"]))
