@@ -57,15 +57,22 @@ for df in [prov_prod, prov_cons, bank_df, sector_df]:
     df.columns = df.columns.str.strip()
 
 # =====================================================
-# SEVERITY – AMORTIZING (FINAL & SESUAI EXCEL)
+# SEVERITY – AMORTIZING BULANAN (FINAL, MATCH EXCEL)
 # =====================================================
 def outstanding_schedule(loan_rate, tenor_year):
     r = loan_rate / 12
     n = tenor_year * 12
-    return np.array([
-        ((1 + r) ** n - (1 + r) ** m) / ((1 + r) ** n - 1)
-        for m in range(1, n + 1)
-    ])
+    annuity = r / (1 - (1 + r) ** -n)
+
+    outstanding = []
+    balance = 1.0
+    for _ in range(n):
+        interest = balance * r
+        principal = annuity - interest
+        balance -= principal
+        outstanding.append(balance)
+
+    return np.array(outstanding)
 
 def average_baki_debet_per_year(loan_rate, tenor_year):
     sch = outstanding_schedule(loan_rate, tenor_year)
@@ -156,25 +163,34 @@ if st.button("Calculate"):
         st.error("Expense + Profit ≥ 100%")
         st.stop()
 
-    # --- NPL ACUAN (RELATIVITY = 1)
+    # =================================================
+    # NPL ACUAN (RELATIVITY = 1)
+    # =================================================
     base_npl_row = prov_df.loc[np.isclose(prov_df["Average Relativity"], 1.0)]
+    if base_npl_row.empty:
+        st.error("Tidak ditemukan NPL acuan (Average Relativity = 1)")
+        st.stop()
     npl_base = float(base_npl_row["Average NPL"].iloc[0])
 
-    # --- RELATIVITY
+    # =================================================
+    # RELATIVITY
+    # =================================================
     rel_p = safe_get_value(prov_df, "Provinsi", wilayah, "Average Relativity")
     rel_b = safe_get_value(bank_df, "Jenis Bank", jenis_bank, "Average Relativity")
     rel_s = safe_get_value(sector_df, "Sektor", sektor, "Average Relativity")
 
     total_rel = min(rel_p * rel_b * rel_s, MAX_RELATIVITY)
 
-    # --- FREKUENSI (dipakai internal, tidak ditampilkan)
+    # =================================================
+    # FREKUENSI (INTERNAL)
+    # =================================================
     recovery = rec_prod if jenis_kredit == "Produktif" else rec_cons
     frek = npl_base * total_rel * coverage * (1 - recovery)
     if jenis_kredit == "Konsumtif":
         frek *= porsi_non_nd
 
     # =================================================
-    # HASIL (FORMAT SESUAI TABEL USER)
+    # OUTPUT TABLE (SESUAI REQUEST)
     # =================================================
     results = []
 
