@@ -1,162 +1,241 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import tempfile
+
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib import colors
 
 # =====================================================
-# PAGE CONFIG
+# CONFIG
 # =====================================================
+MAX_COVERAGE = 0.75
+MAX_RELATIVITY = 3.5
+ACQUISITION_OPTIONS = [0.0, 0.025, 0.05, 0.075, 0.10]
+
 st.set_page_config(
     page_title="Pricing Asuransi Kredit",
     layout="wide"
 )
 
-st.title("📊 Pricing Asuransi Kredit")
-
-MASTER_FILE = "master_askred.xlsx"  # pastikan nama file sesuai
-
-# =====================================================
-# HELPER
-# =====================================================
-def clean_dropdown(series):
-    return (
-        series.dropna()
-        .astype(str)
-        .str.strip()
-        .sort_values()
-        .unique()
-        .tolist()
-    )
-
-def to_decimal(x):
-    """Konversi input persen → desimal"""
-    if x > 1:
-        return x / 100
-    return x
+st.title("📊 Pricing Asuransi Kredit – Data OJK per September 2025")
+st.caption("By Divisi Aktuaria Askrindo")
 
 # =====================================================
-# LOAD MASTER
+# HELPER – RATE STANDARDIZATION
+# =====================================================
+def percent_input_to_decimal(x):
+    """
+    Semua input rate dari UI:
+    - jika > 1 → dianggap persen
+    - jika <= 1 → dianggap sudah desimal
+    """
+    return x / 100 if x > 1 else x
+
+# =====================================================
+# LOAD MASTER DATA
 # =====================================================
 @st.cache_data
 def load_master():
-    xls = pd.ExcelFile(MASTER_FILE)
+    xls = pd.ExcelFile("Data Base OJK.xlsx")
 
-    prov_prod = pd.read_excel(xls, xls.sheet_names[0])
-    prov_cons = pd.read_excel(xls, xls.sheet_names[1])
-    bank_df   = pd.read_excel(xls, xls.sheet_names[2])
-    sector_df = pd.read_excel(xls, xls.sheet_names[3])
+    prov_prod = pd.read_excel(xls, "NPL Produktif per Provinsi")
+    prov_cons = pd.read_excel(xls, "NPL Konsumtif per Provinsi")
+    bank_df   = pd.read_excel(xls, "NPL Jenis Bank")
+    sector_df = pd.read_excel(xls, "NPL Sektor")
+
+    # strip column names (ANTI SPASI TERSEMBUNYI)
+    for df in [prov_prod, prov_cons, bank_df, sector_df]:
+        df.columns = df.columns.str.strip()
 
     return prov_prod, prov_cons, bank_df, sector_df
 
 prov_prod, prov_cons, bank_df, sector_df = load_master()
 
 # =====================================================
-# SIDEBAR – ASUMSI PRICING
+# STRICT COLUMN CHECK
 # =====================================================
-st.sidebar.header("Asumsi Pricing")
-
-risk_margin_input = st.sidebar.number_input("Risk Margin", 0.0, 1.0, 0.25)
-expense_input     = st.sidebar.number_input("Expense", 0.0, 1.0, 0.15)
-profit_input      = st.sidebar.number_input("Profit", 0.0, 1.0, 0.05)
-
-recovery_prod     = st.sidebar.number_input("Recoveries Produktif", 0.0, 1.0, 0.0)
-recovery_cons     = st.sidebar.number_input("Recoveries Konsumtif", 0.0, 1.0, 0.0)
-
-bunga_investasi_input = st.sidebar.number_input(
-    "Suku Bunga Investasi",
-    min_value=0.0,
-    max_value=1.0,
-    value=0.06106778,
-    step=0.00000001,
-    format="%.8f"
-)
-
-porsi_non_nd          = st.sidebar.number_input("Porsi Non-ND", 0.0, 1.0, 0.40)
-
-# Konversi ke desimal
-risk_margin = to_decimal(risk_margin_input)
-expense     = to_decimal(expense_input)
-profit      = to_decimal(profit_input)
-bunga_investasi = to_decimal(bunga_investasi_input)
-
-# Validasi denominator (POINT 2)
-denom = 1 - risk_margin - expense - profit
-if denom <= 0:
-    st.error("Risk Margin + Expense + Profit ≥ 100%")
-    st.stop()
+def require_column(df, col):
+    if col not in df.columns:
+        raise ValueError(f"Kolom '{col}' WAJIB ada di Excel")
+    return col
 
 # =====================================================
-# IDENTITAS RISIKO
+# HELPER FUNCTIONS – PRICING LOGIC
+# =====================================================
+def get_value(df, key_col, key_val, val_col):
+    return float(df.loc[df[key_col] == key_val, val_col].values[0])
+
+def calc_total_relativity(rp, rb, rs):
+    return min(rp * rb * rs, MAX_RELATIVITY)
+
+def expected_probability(npl, porsi_non_nd, relativity, coverage, recovery):
+    return npl * porsi_non_nd * relativity * coverage * (1 - recovery)
+
+def average_baki_debet(rate, tenor):
+    balances = [(1 / ((1 + rate) ** t)) for t in range(1, tenor + 1)]
+    return np.mean(balances)
+
+def pure_rate(probability, severity):
+    return probability * severity
+
+def gross_rate(pure, risk_margin, expense, profit, acquisition):
+    return (pure * (1 + risk_margin)) / (1 - expense - profit - acquisition)
+
+# =====================================================
+# INPUT IDENTITAS
 # =====================================================
 st.subheader("Identitas Risiko")
 
-col1, col2 = st.columns(2)
-with col1:
+c1, c2 = st.columns(2)
+with c1:
     nama_tertanggung = st.text_input("Nama Tertanggung")
-    nama_bank        = st.text_input("Nama Bank")
-with col2:
+    nama_bank_input = st.text_input("Nama Bank")
+with c2:
     no_polis = st.text_input("Nomor Polis Existing", "New")
-    no_pks   = st.text_input("Nomor PKS Existing", "New")
+    no_pks = st.text_input("Nomor PKS Existing", "New")
 
 # =====================================================
-# DATA RISIKO
+# INPUT DATA RISIKO
 # =====================================================
 st.subheader("Data Risiko")
 
-# ---- ROW 1 (sesuai gambar)
-c1, c2, c3, c4, c5, c6 = st.columns([1, 1, 1, 0.8, 1, 1])
+c1, c2, c3 = st.columns(3)
 
 with c1:
     jenis_kredit = st.selectbox("Jenis Kredit", ["Produktif", "Konsumtif"])
+    prov_df = prov_prod if jenis_kredit == "Produktif" else prov_cons
 
-prov_df = prov_prod if jenis_kredit == "Produktif" else prov_cons
+    prov_col = require_column(prov_df, "Provinsi")
+    npl_col  = require_column(prov_df, "Average NPL")
+    rel_col  = require_column(prov_df, "Average Relativity")
+
+    wilayah = st.selectbox("Wilayah", prov_df[prov_col].dropna().unique())
 
 with c2:
-    wilayah = st.selectbox(
-        "Wilayah",
-        clean_dropdown(prov_df["Wilayah"])
-    )
+    bank_col     = require_column(bank_df, "Jenis Bank")
+    bank_rel_col = require_column(bank_df, "Average Relativity")
+
+    jenis_bank = st.selectbox("Jenis Bank", bank_df[bank_col].dropna().unique())
+
+    sector_col     = require_column(sector_df, "Sektor")
+    sector_rel_col = require_column(sector_df, "Average Relativity")
+
+    sektor = st.selectbox("Sektor", sector_df[sector_col].dropna().unique())
 
 with c3:
-    jenis_bank = st.selectbox(
-        "Jenis Bank",
-        clean_dropdown(bank_df["Jenis Bank"])
+    coverage = st.number_input("Coverage", 0.0, MAX_COVERAGE, 0.6)
+
+    loan_rate_input = st.number_input(
+        "Suku Bunga Kredit (%)",
+        0.0, 50.0, 12.0
+    )
+    loan_rate = percent_input_to_decimal(loan_rate_input)
+
+    tenor = st.number_input("Jangka Waktu (Tahun)", 1, 20, 3)
+
+# =====================================================
+# SIDEBAR – ASSUMPTIONS
+# =====================================================
+st.sidebar.header("Asumsi Pricing")
+
+risk_margin = st.sidebar.number_input("Risk Margin", 0.0, 1.0, 0.25)
+expense     = st.sidebar.number_input("Expense", 0.0, 1.0, 0.15)
+profit      = st.sidebar.number_input("Profit", 0.0, 1.0, 0.1)
+
+rec_prod = st.sidebar.number_input("Recoveries Produktif", 0.0, 1.0, 0.0)
+rec_cons = st.sidebar.number_input("Recoveries Konsumtif", 0.0, 1.0, 0.0)
+
+inv_rate_input = st.sidebar.number_input(
+    "Suku Bunga Investasi (%)",
+    min_value=0.0,
+    max_value=20.0,
+    value=6.0,
+    step=0.00000001,
+    format="%.8f"
+)
+inv_rate = percent_input_to_decimal(inv_rate_input)
+
+porsi_non_nd = st.sidebar.number_input("Porsi Non-ND", 0.0, 1.0, 0.4)
+
+# =====================================================
+# CALCULATE
+# =====================================================
+if st.button("Calculate"):
+
+    # ---- VALIDASI DENOMINATOR (POINT 2)
+    base_denom = 1 - expense - profit
+    if base_denom <= 0:
+        st.error("Expense + Profit ≥ 100% → model tidak valid")
+        st.stop()
+
+    npl = get_value(prov_df, prov_col, wilayah, npl_col)
+
+    rel_p = get_value(prov_df, prov_col, wilayah, rel_col)
+    rel_b = get_value(bank_df, bank_col, jenis_bank, bank_rel_col)
+    rel_s = get_value(sector_df, sector_col, sektor, sector_rel_col)
+
+    total_rel = calc_total_relativity(rel_p, rel_b, rel_s)
+
+    recovery = rec_prod if jenis_kredit == "Produktif" else rec_cons
+
+    prob = expected_probability(
+        npl, porsi_non_nd, total_rel, coverage, recovery
     )
 
-with c4:
-    coverage = st.number_input("Coverage", 0.0, 1.0, 0.75)
+    avg_bd = average_baki_debet(loan_rate, tenor)
+    severity = avg_bd / ((1 + inv_rate) ** tenor)
 
-with c5:
-    bunga_kredit_input = st.number_input("Suku Bunga Kredit (%)", 0.0, 100.0, 11.0)
-    bunga_kredit = to_decimal(bunga_kredit_input)
-
-with c6:
-    tenor = st.number_input("Jangka Waktu (Tahun)", 1, 30, 1)
-
-# ---- SEKTOR (FULL WIDTH, PALING BAWAH)
-sektor = st.selectbox(
-    "Sektor",
-    clean_dropdown(sector_df["Sektor"])
-)
-
-# =====================================================
-# CALCULATION
-# =====================================================
-st.markdown("---")
-
-if st.button("Calculate"):
-    # Dummy PD & LGD (placeholder, nanti bisa tarik dari tabel)
-    pd_rate = 0.02
-    lgd = coverage * (1 - (recovery_prod if jenis_kredit == "Produktif" else recovery_cons))
-
-    expected_loss = pd_rate * lgd * tenor
-    net_risk_rate = expected_loss * (1 + bunga_kredit - bunga_investasi)
-
-    gross_rate = net_risk_rate / denom
-
-    result_df = pd.DataFrame({
-        "Akusisi": [f"{x:.1%}" for x in np.arange(0, 0.125, 0.025)],
-        "Gross Rate": [gross_rate * (1 + x) * 100 for x in np.arange(0, 0.125, 0.025)]
-    })
+    pure = pure_rate(prob, severity)
 
     st.subheader("Hasil Perhitungan Rate")
-    st.dataframe(result_df, use_container_width=True)
+
+    results = []
+    for acq in ACQUISITION_OPTIONS:
+
+        if base_denom - acq <= 0:
+            results.append([f"{acq*100:.1f}%", "INVALID"])
+            continue
+
+        gr = gross_rate(pure, risk_margin, expense, profit, acq)
+        results.append([f"{acq*100:.1f}%", f"{gr:.4%}"])
+
+    df_result = pd.DataFrame(results, columns=["Akuisisi", "Gross Rate"])
+    st.table(df_result)
+
+    # =================================================
+    # EXPORT PDF
+    # =================================================
+    if st.button("Export PDF"):
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+        styles = getSampleStyleSheet()
+        doc = SimpleDocTemplate(tmp.name)
+
+        story = [
+            Paragraph("<b>Pricing Asuransi Kredit – Data OJK per September 2025</b>", styles["Title"]),
+            Spacer(1, 12),
+            Paragraph(f"Nama Tertanggung: {nama_tertanggung}", styles["Normal"]),
+            Paragraph(f"Nama Bank: {nama_bank_input}", styles["Normal"]),
+            Paragraph(f"Nomor Polis: {no_polis}", styles["Normal"]),
+            Paragraph(f"Nomor PKS: {no_pks}", styles["Normal"]),
+            Spacer(1, 12),
+        ]
+
+        table = Table(
+            [["Akuisisi", "Gross Rate"]] + results,
+            style=TableStyle([
+                ("GRID", (0,0), (-1,-1), 0.5, colors.black),
+                ("BACKGROUND", (0,0), (-1,0), colors.lightgrey)
+            ])
+        )
+
+        story.append(table)
+        doc.build(story)
+
+        with open(tmp.name, "rb") as f:
+            st.download_button(
+                "Download PDF",
+                f,
+                file_name="Pricing_Askred.pdf"
+            )
