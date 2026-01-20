@@ -6,51 +6,48 @@ import numpy as np
 # CONFIG
 # =====================================================
 MAX_RELATIVITY = 3.5
-ACQUISITION_OPTIONS = [0.0, 2.5, 5.0, 7.5, 10.0]
+ACQUISITION_OPTIONS = [0.0, 2.5, 5.0, 7.5, 10.0]  # %
 MAX_TENOR = 5
 
-st.set_page_config(page_title="Pricing Asuransi Kredit", layout="wide")
+st.set_page_config(
+    page_title="Pricing Asuransi Kredit",
+    layout="wide"
+)
+
 st.title("📊 Pricing Asuransi Kredit – Data OJK")
 st.caption("Divisi Aktuaria")
 
 # =====================================================
 # HELPER
 # =====================================================
-def pct(x): return x / 100
+def pct(x):
+    return x / 100.0
 
-def clean_options(s):
-    return s.dropna().astype(str).str.strip().unique().tolist()
+def clean_options(series):
+    return (
+        series.dropna()
+        .astype(str)
+        .str.strip()
+        .sort_values()
+        .unique()
+        .tolist()
+    )
 
-def safe_get(df, k, v, c):
-    r = df.loc[df[k].astype(str).str.strip() == str(v).strip(), c]
-    if r.empty:
-        st.error(f"Data tidak ditemukan: {v}")
+def safe_get_value(df, key_col, key_val, val_col):
+    row = df.loc[
+        df[key_col].astype(str).str.strip() == str(key_val).strip(),
+        val_col
+    ]
+    if row.empty:
+        st.error(f"Data tidak ditemukan: {key_col} = {key_val}")
         st.stop()
-    return float(r.iloc[0])
-
-# =====================================================
-# LOAN & SEVERITY (FINAL)
-# =====================================================
-def outstanding_schedule(rate_annual, tenor_year):
-    r = rate_annual / 12
-    n = tenor_year * 12
-    return np.array([
-        ((1 + r) ** n - (1 + r) ** m) / ((1 + r) ** n - 1)
-        for m in range(1, n + 1)
-    ])
-
-def average_baki_debet(rate_annual, tenor_year):
-    sch = outstanding_schedule(rate_annual, tenor_year)
-    return [sch[i*12:(i+1)*12].mean() for i in range(tenor_year)]
-
-def severity_amortizing(rate_kredit, rate_invest, tenor_year):
-    abd = average_baki_debet(rate_kredit, tenor_year)
-    return sum(abd[i] / ((1 + rate_invest) ** i) for i in range(len(abd)))
+    return float(row.iloc[0])
 
 # =====================================================
 # LOAD DATA
 # =====================================================
 xls = pd.ExcelFile("Data Base OJK.xlsx")
+
 prov_prod = pd.read_excel(xls, "NPL Produktif per Provinsi")
 prov_cons = pd.read_excel(xls, "NPL Konsumtif per Provinsi")
 bank_df   = pd.read_excel(xls, "NPL Jenis Bank")
@@ -60,11 +57,50 @@ for df in [prov_prod, prov_cons, bank_df, sector_df]:
     df.columns = df.columns.str.strip()
 
 # =====================================================
-# INPUT
+# SEVERITY – AMORTIZING (FINAL & SESUAI EXCEL)
+# =====================================================
+def outstanding_schedule(loan_rate, tenor_year):
+    r = loan_rate / 12
+    n = tenor_year * 12
+    return np.array([
+        ((1 + r) ** n - (1 + r) ** m) / ((1 + r) ** n - 1)
+        for m in range(1, n + 1)
+    ])
+
+def average_baki_debet_per_year(loan_rate, tenor_year):
+    sch = outstanding_schedule(loan_rate, tenor_year)
+    return [
+        sch[y*12:(y+1)*12].mean()
+        for y in range(tenor_year)
+    ]
+
+def severity_by_tenor(loan_rate, inv_rate, tenor):
+    abd_year = average_baki_debet_per_year(loan_rate, tenor)
+    sev = 0.0
+    for i, abd in enumerate(abd_year):
+        pv = 1 / ((1 + inv_rate) ** i)
+        sev += abd * pv
+    return sev
+
+# =====================================================
+# IDENTITAS
+# =====================================================
+st.subheader("Identitas Risiko")
+
+c1, c2 = st.columns(2)
+with c1:
+    nama_tertanggung = st.text_input("Nama Tertanggung")
+    nama_bank_input = st.text_input("Nama Bank")
+with c2:
+    no_polis = st.text_input("Nomor Polis Existing", "New")
+    no_pks = st.text_input("Nomor PKS Existing", "New")
+
+# =====================================================
+# DATA RISIKO
 # =====================================================
 st.subheader("Data Risiko")
 
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3, c4, c5, c6 = st.columns(6)
 
 with c1:
     jenis_kredit = st.selectbox("Jenis Kredit", ["Produktif", "Konsumtif"])
@@ -73,60 +109,92 @@ with c1:
 
 with c2:
     jenis_bank = st.selectbox("Jenis Bank", clean_options(bank_df["Jenis Bank"]))
-    sektor = st.selectbox("Sektor", clean_options(sector_df["Sektor"]))
 
 with c3:
-    coverage = pct(st.number_input("Coverage (%)", 0.0, 100.0, 75.0, 0.01))
-    rate_kredit = pct(st.number_input("Suku Bunga Kredit (%)", 0.0, 50.0, 11.0, 0.01))
+    coverage_pct = st.number_input(
+        "Coverage (%)", 0.0, 100.0, 75.00, step=0.01, format="%.2f"
+    )
+    coverage = pct(coverage_pct)
 
 with c4:
-    tenor = st.number_input("Tenor Maks (Tahun)", 1, MAX_TENOR, 5)
+    loan_rate_pct = st.number_input(
+        "Suku Bunga Kredit (%)", 0.0, 50.0, 11.00, step=0.01, format="%.2f"
+    )
+    loan_rate = pct(loan_rate_pct)
+
+with c5:
+    tenor = st.number_input("Jangka Waktu (Tahun)", 1, MAX_TENOR, MAX_TENOR)
+
+# ---- SEKTOR
+sektor = st.selectbox("Sektor", clean_options(sector_df["Sektor"]))
 
 # =====================================================
-# SIDEBAR
+# SIDEBAR – ASUMSI
 # =====================================================
 st.sidebar.header("Asumsi Pricing (%)")
-risk_margin = pct(st.sidebar.number_input("Risk Margin", 0.0, 100.0, 25.0, 0.01))
-expense     = pct(st.sidebar.number_input("Expense", 0.0, 100.0, 15.0, 0.01))
-profit      = pct(st.sidebar.number_input("Profit", 0.0, 100.0, 10.0, 0.01))
-recovery    = pct(st.sidebar.number_input("Recovery", 0.0, 100.0, 0.0, 0.01))
-inv_rate    = pct(st.sidebar.number_input("Suku Bunga Investasi", 0.0, 20.0, 6.1, 0.0001))
-porsi_non_nd = pct(st.sidebar.number_input("Porsi Non-ND", 0.0, 100.0, 40.0, 0.01))
+
+risk_margin = pct(st.sidebar.number_input("Risk Margin (%)", 0.0, 100.0, 25.00, 0.01))
+expense     = pct(st.sidebar.number_input("Expense (%)", 0.0, 100.0, 15.00, 0.01))
+profit      = pct(st.sidebar.number_input("Profit (%)", 0.0, 100.0, 10.00, 0.01))
+
+rec_prod = pct(st.sidebar.number_input("Recoveries Produktif (%)", 0.0, 100.0, 0.00, 0.01))
+rec_cons = pct(st.sidebar.number_input("Recoveries Konsumtif (%)", 0.0, 100.0, 0.00, 0.01))
+
+inv_rate = pct(st.sidebar.number_input(
+    "Suku Bunga Investasi (%)", 0.0, 20.0, 6.10, step=0.0001, format="%.4f"
+))
+
+porsi_non_nd = pct(st.sidebar.number_input("Porsi Non-ND (%)", 0.0, 100.0, 40.00, 0.01))
 
 # =====================================================
 # CALCULATION
 # =====================================================
 if st.button("Calculate"):
 
-    base_npl = prov_df.loc[np.isclose(prov_df["Average Relativity"], 1), "Average NPL"].iloc[0]
+    base_denom = 1 - expense - profit
+    if base_denom <= 0:
+        st.error("Expense + Profit ≥ 100%")
+        st.stop()
 
-    rel = (
-        safe_get(prov_df, "Provinsi", wilayah, "Average Relativity") *
-        safe_get(bank_df, "Jenis Bank", jenis_bank, "Average Relativity") *
-        safe_get(sector_df, "Sektor", sektor, "Average Relativity")
-    )
+    # --- NPL ACUAN (RELATIVITY = 1)
+    base_npl_row = prov_df.loc[np.isclose(prov_df["Average Relativity"], 1.0)]
+    npl_base = float(base_npl_row["Average NPL"].iloc[0])
 
-    frek = base_npl * rel * coverage * (1 - recovery)
+    # --- RELATIVITY
+    rel_p = safe_get_value(prov_df, "Provinsi", wilayah, "Average Relativity")
+    rel_b = safe_get_value(bank_df, "Jenis Bank", jenis_bank, "Average Relativity")
+    rel_s = safe_get_value(sector_df, "Sektor", sektor, "Average Relativity")
+
+    total_rel = min(rel_p * rel_b * rel_s, MAX_RELATIVITY)
+
+    # --- FREKUENSI (dipakai internal, tidak ditampilkan)
+    recovery = rec_prod if jenis_kredit == "Produktif" else rec_cons
+    frek = npl_base * total_rel * coverage * (1 - recovery)
     if jenis_kredit == "Konsumtif":
         frek *= porsi_non_nd
 
+    # =================================================
+    # HASIL (FORMAT SESUAI TABEL USER)
+    # =================================================
     results = []
 
     for acq in ACQUISITION_OPTIONS:
         row = [f"{acq:.1f}%"]
-        den = 1 - expense - profit - pct(acq)
+        acq_d = pct(acq)
+        den = base_denom - acq_d
 
         for t in range(1, tenor + 1):
-            sev = severity_amortizing(rate_kredit, inv_rate, t)
+            sev = severity_by_tenor(loan_rate, inv_rate, t)
             pure = frek * sev
             gross = (pure * (1 + risk_margin)) / den
             row.append(f"{gross:.4%}")
 
         results.append(row)
 
-    columns = ["Akuisisi"] + \
-              ["Rate 1 tahun"] + \
-              [f"Rate Sekaligus {i} tahun" for i in range(2, tenor + 1)]
+    columns = (
+        ["Akuisisi", "Rate 1 tahun"] +
+        [f"Rate Sekaligus {i} tahun" for i in range(2, tenor + 1)]
+    )
 
     st.subheader("Hasil Perhitungan Rate")
     st.table(pd.DataFrame(results, columns=columns))
