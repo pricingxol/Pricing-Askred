@@ -84,10 +84,12 @@ def average_baki_debet_per_year(loan_rate, tenor_year):
 def severity_by_tenor(loan_rate, inv_rate, tenor):
     abd_year = average_baki_debet_per_year(loan_rate, tenor)
     sev = 0.0
-    for i, abd in enumerate(abd_year):
+    for i, abd in enumerate(abd_year, start=1):
         pv = 1 / ((1 + inv_rate) ** i)
         sev += abd * pv
     return sev
+
+
 
 # =====================================================
 # IDENTITAS
