@@ -67,10 +67,13 @@ def outstanding_schedule(loan_rate, tenor_year):
     outstanding = []
     balance = 1.0
     for _ in range(n):
+        opening = balance
         interest = balance * r
         principal = annuity - interest
         balance -= principal
-        outstanding.append(balance)
+
+        avg_balance = (opening + balance) / 2   # 🔥 KUNCI UTAMA
+        outstanding.append(avg_balance)
 
     return np.array(outstanding)
 
