@@ -56,7 +56,7 @@ for df in [prov_prod, prov_cons, bank_df, sector_df]:
     df.columns = df.columns.str.strip()
 
 # =====================================================
-# SEVERITY – SESUAI EXCEL
+# SEVERITY – SESUAI NORMA ASKRED
 # =====================================================
 def severity_by_tenor(loan_rate, inv_rate, tenor):
     sev = 0.0
@@ -67,7 +67,7 @@ def severity_by_tenor(loan_rate, inv_rate, tenor):
     return sev
 
 # =====================================================
-# INPUT IDENTITAS
+# IDENTITAS
 # =====================================================
 st.subheader("Identitas Risiko")
 
@@ -140,42 +140,65 @@ if st.button("Calculate"):
         st.error("Expense + Profit ≥ 100%")
         st.stop()
 
-    # --- NPL
-    npl = safe_get_value(prov_df, "Provinsi", wilayah, "Average NPL")
+    # =================================================
+    # NPL ACUAN (RELATIVITY = 1)
+    # =================================================
+    base_npl_row = prov_df.loc[
+        np.isclose(prov_df["Average Relativity"], 1.0)
+    ]
 
-    # --- RELATIVITY
+    if base_npl_row.empty:
+        st.error("Tidak ditemukan provinsi acuan (Average Relativity = 1)")
+        st.stop()
+
+    npl_base = float(base_npl_row["Average NPL"].iloc[0])
+
+    # =================================================
+    # RELATIVITY
+    # =================================================
     rel_p = safe_get_value(prov_df, "Provinsi", wilayah, "Average Relativity")
     rel_b = safe_get_value(bank_df, "Jenis Bank", jenis_bank, "Average Relativity")
     rel_s = safe_get_value(sector_df, "Sektor", sektor, "Average Relativity")
 
     total_rel = min(rel_p * rel_b * rel_s, MAX_RELATIVITY)
 
-    # --- FREKUENSI (FINAL)
+    # =================================================
+    # FREKUENSI
+    # =================================================
     recovery = rec_prod if jenis_kredit == "Produktif" else rec_cons
 
     if jenis_kredit == "Produktif":
-        frek = npl * total_rel * coverage * (1 - recovery)
+        frek = npl_base * total_rel * coverage * (1 - recovery)
     else:
-        frek = npl * porsi_non_nd * total_rel * coverage * (1 - recovery)
+        frek = npl_base * porsi_non_nd * total_rel * coverage * (1 - recovery)
 
     st.info(f"Frekuensi: {frek:.4%}")
 
-    # --- HASIL PER TENOR
-    results = []
+    # =================================================
+    # SEVERITY & RATE
+    # =================================================
+    sev = severity_by_tenor(loan_rate, inv_rate, tenor)
+    pure_rate = frek * sev
 
+    results = []
     for acq in ACQUISITION_OPTIONS:
         acq_d = pct(acq)
         den = base_denom - acq_d
         if den <= 0:
-            results.append([f"{acq:.1f}%", "INVALID"])
+            results.append([f"{acq:.1f}%", "INVALID", "INVALID", "INVALID"])
             continue
 
-        sev = severity_by_tenor(loan_rate, inv_rate, tenor)
-        rate_net = frek * sev
+        gross = (pure_rate * (1 + risk_margin)) / den
 
-        gross = (rate_net * (1 + risk_margin)) / den
-
-        results.append([f"{acq:.1f}%", f"{gross:.4%}"])
+        results.append([
+            f"{acq:.1f}%",
+            f"{sev:.4%}",
+            f"{pure_rate:.4%}",
+            f"{gross:.4%}"
+        ])
 
     st.subheader("Hasil Perhitungan Rate")
-    st.table(pd.DataFrame(results, columns=["Akuisisi", "Gross Rate"]))
+    st.table(pd.DataFrame(
+        results,
+        columns=["Akuisisi", "Severity", "Pure Rate", "Gross Rate"]
+    ))
