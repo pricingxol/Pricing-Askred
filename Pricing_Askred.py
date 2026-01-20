@@ -197,15 +197,18 @@ if st.button("Calculate"):
     for acq in ACQUISITION_OPTIONS:
         row = [f"{acq:.1f}%"]
         acq_d = pct(acq)
-        den = base_denom - acq_d
 
         for t in range(1, tenor + 1):
             sev = severity_by_tenor(loan_rate, inv_rate, t)
             pure = frek * sev
+
+            den = 1 - expense - profit - acq_d
             gross = (pure * (1 + risk_margin)) / den
+
             row.append(f"{gross:.4%}")
 
         results.append(row)
+
 
     columns = (
         ["Akuisisi", "Rate 1 tahun"] +
